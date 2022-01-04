@@ -11,7 +11,7 @@ use core::pin::Pin;
 use cortex_m::peripheral::{syst, Peripherals};
 use cortex_m_semihosting::{debug, hprintln};
 
-use stm32test::{sleep_for, yield_once, Executor, FromTicks, Monotonic, SystickClock};
+use stm32test::{sleep_for, Executor, FromTicks, Monotonic, SystickClock};
 
 type Duration = <SystickClock as Monotonic>::Duration;
 
@@ -37,7 +37,6 @@ const APP: () = {
 	#[idle(resources = [&clock])]
 	fn idle(cx: idle::Context) -> ! {
 		let mut executor = Executor::new(
-			cx.resources.clock,
 			async {
 				loop {
 					hprintln!("task 1").unwrap();

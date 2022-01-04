@@ -1,33 +1,27 @@
 #![no_std]
 use core::cmp;
 use core::future::Future;
-use core::marker::PhantomData;
 use core::ops::{Add, Sub};
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use pin_project_lite::pin_project;
 
 pub enum NoReturn {}
 
-struct WakeupCondition<C> {
-	inner: AtomicU32,
-	clock: PhantomData<C>,
+#[repr(transparent)]
+struct WakeupCondition {
+	inner: AtomicBool,
 }
-
-const COND_TIMED_FLAG: u32 = 0x8000_0000;
-const COND_WOKEN_FLAG: u32 = 0x4000_0000;
-const COND_TIME_MASK: u32 = 0x0000_FFFF;
-const COND_TIME_SHIFT: u32 = 0;
 
 unsafe fn raw_waker_clone(data: *const ()) -> RawWaker {
 	RawWaker::new(data, &WAKER_VTABLE)
 }
 
 unsafe fn raw_waker_wake(data: *const ()) {
-	let this: &AtomicU32 = core::mem::transmute(data);
-	this.store(COND_WOKEN_FLAG, Ordering::Release);
+	let this: &AtomicBool = core::mem::transmute(data);
+	this.store(true, Ordering::Release);
 }
 
 unsafe fn raw_waker_drop(_: *const ()) {}
@@ -39,32 +33,26 @@ static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 	raw_waker_drop,
 );
 
-impl<C> WakeupCondition<C> {
+impl WakeupCondition {
 	const fn new() -> Self {
 		Self {
-			clock: PhantomData,
-			inner: AtomicU32::new(COND_WOKEN_FLAG),
+			inner: AtomicBool::new(true),
 		}
 	}
-}
 
-impl<C: Monotonic> WakeupCondition<C> {
-	fn is_ready(&self, clock: &C) -> bool {
-		let state = self.inner.load(Ordering::Acquire);
-		if state & COND_WOKEN_FLAG == COND_WOKEN_FLAG {
-			return true;
+	#[inline(always)]
+	fn take_ready(&self) -> bool {
+		match self
+			.inner
+			.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+		{
+			Ok(_) => true,
+			Err(_) => false,
 		}
-		if state & COND_TIMED_FLAG == COND_TIMED_FLAG {
-			let wakeup_at =
-				C::Instant::from_ticks(((state & COND_TIME_MASK) >> COND_TIME_SHIFT) as u16);
-			let now = clock.now();
-			return now >= wakeup_at;
-		}
-		false
 	}
 
 	fn set_never(&self) {
-		self.inner.store(0u32, Ordering::Release);
+		self.inner.store(false, Ordering::Release);
 	}
 
 	fn waker(self: Pin<&Self>) -> Waker {
@@ -79,15 +67,15 @@ impl<C: Monotonic> WakeupCondition<C> {
 }
 
 pin_project! {
-	struct Task<C, T> {
+	struct Task<T> {
 		#[pin]
 		inner: T,
 		#[pin]
-		wakeup_condition: WakeupCondition<C>,
+		wakeup_condition: WakeupCondition,
 	}
 }
 
-impl<C, T> Task<C, T> {
+impl<T> Task<T> {
 	const fn wrap(inner: T) -> Self {
 		Self {
 			inner,
@@ -96,9 +84,9 @@ impl<C, T> Task<C, T> {
 	}
 }
 
-impl<C: Monotonic, T: Future> Task<C, T> {
-	fn advance(self: Pin<&mut Self>, clock: &C) {
-		if self.wakeup_condition.is_ready(clock) {
+impl<T: Future> Task<T> {
+	fn advance(self: Pin<&mut Self>) {
+		if self.wakeup_condition.take_ready() {
 			let this = self.project();
 			let waker = this.wakeup_condition.as_ref().waker();
 			let mut cx = Context::from_waker(&waker);
@@ -256,30 +244,28 @@ impl<T: Monotonic> Monotonic for &T {
 }
 
 pin_project! {
-	pub struct Executor<T, A, B> {
-		clock: T,
+	pub struct Executor<A, B> {
 		#[pin]
-		f0: Task<T, A>,
+		f0: Task<A>,
 		#[pin]
-		f1: Task<T, B>,
+		f1: Task<B>,
 	}
 }
 
-impl<T, A, B> Executor<T, A, B> {
-	pub const fn new(clock: T, f0: A, f1: B) -> Self {
+impl<A, B> Executor<A, B> {
+	pub const fn new(f0: A, f1: B) -> Self {
 		Self {
-			clock,
 			f0: Task::wrap(f0),
 			f1: Task::wrap(f1),
 		}
 	}
 }
 
-impl<T: Monotonic, A: Future<Output = NoReturn>, B: Future<Output = NoReturn>> Executor<T, A, B> {
+impl<A: Future<Output = NoReturn>, B: Future<Output = NoReturn>> Executor<A, B> {
 	pub fn advance(self: Pin<&mut Self>) -> () {
 		let this = self.project();
-		this.f0.advance(this.clock);
-		this.f1.advance(this.clock);
+		this.f0.advance();
+		this.f1.advance();
 	}
 }
 
