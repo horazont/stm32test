@@ -16,10 +16,10 @@ struct WakeupCondition<C> {
 	clock: PhantomData<C>,
 }
 
-static COND_TIMED_FLAG: u32 = 0x8000_0000;
-static COND_WOKEN_FLAG: u32 = 0x4000_0000;
-static COND_TIME_MASK: u32 = 0x0000_FFFF;
-static COND_TIME_SHIFT: u32 = 0;
+const COND_TIMED_FLAG: u32 = 0x8000_0000;
+const COND_WOKEN_FLAG: u32 = 0x4000_0000;
+const COND_TIME_MASK: u32 = 0x0000_FFFF;
+const COND_TIME_SHIFT: u32 = 0;
 
 unsafe fn raw_waker_clone(data: *const ()) -> RawWaker {
 	RawWaker::new(data, &WAKER_VTABLE)
@@ -41,14 +41,16 @@ static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 	raw_waker_drop,
 );
 
-impl<C: Monotonic> WakeupCondition<C> {
-	fn new() -> Self {
+impl<C> WakeupCondition<C> {
+	const fn new() -> Self {
 		Self{
 			clock: PhantomData,
 			inner: AtomicU32::new(COND_WOKEN_FLAG),
 		}
 	}
+}
 
+impl<C: Monotonic> WakeupCondition<C> {
 	fn is_ready(&self, clock: &C) -> bool {
 		let state = self.inner.load(Ordering::Acquire);
 		if state & COND_WOKEN_FLAG == COND_WOKEN_FLAG {
@@ -86,14 +88,16 @@ pin_project! {
 	}
 }
 
-impl<C: Monotonic, T: Future> Task<C, T> {
-	fn wrap(inner: T) -> Self {
+impl<C, T> Task<C, T> {
+	const fn wrap(inner: T) -> Self {
 		Self{
 			inner,
 			wakeup_condition: WakeupCondition::new(),
 		}
 	}
+}
 
+impl<C: Monotonic, T: Future> Task<C, T> {
 	fn advance(self: Pin<&mut Self>, clock: &C) {
 		if self.wakeup_condition.is_ready(clock) {
 			let this = self.project();
@@ -254,11 +258,13 @@ pin_project! {
 	}
 }
 
-impl<T: Monotonic, A: Future<Output = NoReturn>, B: Future<Output = NoReturn>> Executor<T, A, B> {
-	pub fn new(clock: T, f0: A, f1: B) -> Self {
+impl<T, A, B> Executor<T, A, B> {
+	pub const fn new(clock: T, f0: A, f1: B) -> Self {
 		Self{clock, f0: Task::wrap(f0), f1: Task::wrap(f1)}
 	}
+}
 
+impl<T: Monotonic, A: Future<Output = NoReturn>, B: Future<Output = NoReturn>> Executor<T, A, B> {
 	pub fn advance(self: Pin<&mut Self>) -> () {
 		let this = self.project();
 		this.f0.advance(this.clock);
