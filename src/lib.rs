@@ -1,11 +1,11 @@
 #![no_std]
-use core::marker::PhantomData;
-use core::ops::{Add, Sub};
 use core::cmp;
 use core::future::Future;
-use core::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
+use core::marker::PhantomData;
+use core::ops::{Add, Sub};
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use pin_project_lite::pin_project;
 
@@ -30,9 +30,7 @@ unsafe fn raw_waker_wake(data: *const ()) {
 	this.store(COND_WOKEN_FLAG, Ordering::Release);
 }
 
-unsafe fn raw_waker_drop(_: *const ()) {
-
-}
+unsafe fn raw_waker_drop(_: *const ()) {}
 
 static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 	raw_waker_clone,
@@ -43,7 +41,7 @@ static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 
 impl<C> WakeupCondition<C> {
 	const fn new() -> Self {
-		Self{
+		Self {
 			clock: PhantomData,
 			inner: AtomicU32::new(COND_WOKEN_FLAG),
 		}
@@ -54,12 +52,11 @@ impl<C: Monotonic> WakeupCondition<C> {
 	fn is_ready(&self, clock: &C) -> bool {
 		let state = self.inner.load(Ordering::Acquire);
 		if state & COND_WOKEN_FLAG == COND_WOKEN_FLAG {
-			return true
+			return true;
 		}
 		if state & COND_TIMED_FLAG == COND_TIMED_FLAG {
-			let wakeup_at = C::Instant::from_ticks(
-				((state & COND_TIME_MASK) >> COND_TIME_SHIFT) as u16,
-			);
+			let wakeup_at =
+				C::Instant::from_ticks(((state & COND_TIME_MASK) >> COND_TIME_SHIFT) as u16);
 			let now = clock.now();
 			return now >= wakeup_at;
 		}
@@ -72,10 +69,12 @@ impl<C: Monotonic> WakeupCondition<C> {
 
 	fn waker(self: Pin<&Self>) -> Waker {
 		// SAFETY: from_raw is unsafe because terrible things™ may happen if RawWaker (and its vtable) does not adhere to the contract. To the best of my knowledge, this implementation *does* adhere to the contract and is even sync + send.
-		unsafe { Waker::from_raw( RawWaker::new(
-			core::mem::transmute(&self.inner),
-			&WAKER_VTABLE,
-		)) }
+		unsafe {
+			Waker::from_raw(RawWaker::new(
+				core::mem::transmute(&self.inner),
+				&WAKER_VTABLE,
+			))
+		}
 	}
 }
 
@@ -90,7 +89,7 @@ pin_project! {
 
 impl<C, T> Task<C, T> {
 	const fn wrap(inner: T) -> Self {
-		Self{
+		Self {
 			inner,
 			wakeup_condition: WakeupCondition::new(),
 		}
@@ -107,7 +106,7 @@ impl<C: Monotonic, T: Future> Task<C, T> {
 				Poll::Pending => (),
 				Poll::Ready(_) => {
 					this.wakeup_condition.set_never();
-				},
+				}
 			}
 		}
 	}
@@ -188,7 +187,7 @@ impl FromTicks for Instant {
 impl IntoTicks for Instant {
 	type Ticks = u16;
 
-	fn into_ticks(self) -> u16{
+	fn into_ticks(self) -> u16 {
 		self.0
 	}
 }
@@ -218,15 +217,23 @@ pub trait FromTicks {
 }
 
 pub trait Monotonic {
-    type Instant: cmp::Ord + Copy + Add<Self::Duration, Output = Self::Instant> + Sub<Self::Duration, Output = Self::Instant> + Sub<Self::Instant, Output = Self::Duration> + IntoTicks<Ticks = u16> + FromTicks<Ticks = u16>;
-    type Duration: cmp::Ord + Copy;
+	type Instant: cmp::Ord
+		+ Copy
+		+ Add<Self::Duration, Output = Self::Instant>
+		+ Sub<Self::Duration, Output = Self::Instant>
+		+ Sub<Self::Instant, Output = Self::Duration>
+		+ IntoTicks<Ticks = u16>
+		+ FromTicks<Ticks = u16>;
+	type Duration: cmp::Ord + Copy;
 
-    fn now(&self) -> Self::Instant;
+	fn now(&self) -> Self::Instant;
 }
 
 impl SystickClock {
 	pub fn new() -> Self {
-		Self{now: AtomicU16::new(0)}
+		Self {
+			now: AtomicU16::new(0),
+		}
 	}
 }
 
@@ -260,7 +267,11 @@ pin_project! {
 
 impl<T, A, B> Executor<T, A, B> {
 	pub const fn new(clock: T, f0: A, f1: B) -> Self {
-		Self{clock, f0: Task::wrap(f0), f1: Task::wrap(f1)}
+		Self {
+			clock,
+			f0: Task::wrap(f0),
+			f1: Task::wrap(f1),
+		}
 	}
 }
 
@@ -291,13 +302,13 @@ impl Future for Yield {
 	}
 }
 
-pub struct Sleep<'x, C: Monotonic>{
+pub struct Sleep<'x, C: Monotonic> {
 	clock: &'x C,
 	until: C::Instant,
 }
 
 pub fn sleep_for<'x, C: Monotonic>(c: &'x C, d: C::Duration) -> Sleep<'x, C> {
-	Sleep{
+	Sleep {
 		clock: c,
 		until: c.now() + d,
 	}

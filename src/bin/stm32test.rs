@@ -3,15 +3,15 @@
 
 // pick a panicking behavior
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
-// use panic_abort as _; // requires nightly
-// use panic_itm as _; // logs messages over ITM; requires ITM support
-// use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
+					 // use panic_abort as _; // requires nightly
+					 // use panic_itm as _; // logs messages over ITM; requires ITM support
+					 // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use core::pin::Pin;
 
-use cortex_m::peripheral::{Peripherals, syst};
+use cortex_m::peripheral::{syst, Peripherals};
 use cortex_m_semihosting::{debug, hprintln};
 
-use stm32test::{Executor, SystickClock, sleep_for, Monotonic, FromTicks, yield_once};
+use stm32test::{sleep_for, yield_once, Executor, FromTicks, Monotonic, SystickClock};
 
 type Duration = <SystickClock as Monotonic>::Duration;
 
@@ -21,15 +21,15 @@ const APP: () = {
 		clock: SystickClock,
 	}
 
-    #[init]
-    fn init(_: init::Context) -> init::LateResources {
+	#[init]
+	fn init(_: init::Context) -> init::LateResources {
 		hprintln!("init").unwrap();
 		let mut core = unsafe { Peripherals::steal() };
 		core.SYST.set_clock_source(syst::SystClkSource::Core);
 		core.SYST.set_reload(12000);
 		core.SYST.enable_interrupt();
 		core.SYST.enable_counter();
-		init::LateResources{
+		init::LateResources {
 			clock: SystickClock::new(),
 		}
 	}
@@ -46,9 +46,8 @@ const APP: () = {
 			},
 			async {
 				loop {
-					/* hprintln!("task 2").unwrap();
-					sleep_for(cx.resources.clock, Duration::from_ticks(1500)).await; */
-					yield_once().await;
+					hprintln!("task 2").unwrap();
+					sleep_for(cx.resources.clock, Duration::from_ticks(1500)).await;
 				}
 			},
 		);
