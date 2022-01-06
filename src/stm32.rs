@@ -112,14 +112,17 @@ where
 	}
 }
 
-impl<'x> Future for WriteIntr<'x, Tx<pac::USART1>> {
+impl<'x, USART> Future for WriteIntr<'x, Tx<USART>>
+where
+	Tx<USART>: UsartTxSlot,
+{
 	type Output = ();
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		match this.state {
 			WriteState::Waiting => {
-				match <Tx<pac::USART1> as UsartTxSlot>::try_borrow_mut() {
+				match <Tx<USART> as UsartTxSlot>::try_borrow_mut() {
 					Ok(mut txslot) => match txslot.1 {
 						None => {
 							let buf_slice: &'static [u8] = unsafe {
@@ -132,13 +135,13 @@ impl<'x> Future for WriteIntr<'x, Tx<pac::USART1>> {
 								buf: buf_slice,
 							});
 							*this.state = WriteState::Transmitting;
-							<Tx<pac::USART1> as UsartTxSlot>::drop_and_listen(txslot);
+							<Tx<USART> as UsartTxSlot>::drop_and_listen(txslot);
 							// interrupt will wake us up
 							Poll::Pending
 						}
 						Some(_) => {
 							// need to wait. we also need to re-enable interrupts, because if we raced with the interrupt handler while acquiring the lock, the interrupt handler has failed to acquire it and disabled interrupts in order to let user code continue to operate.
-							<Tx<pac::USART1> as UsartTxSlot>::drop_and_listen(txslot);
+							<Tx<USART> as UsartTxSlot>::drop_and_listen(txslot);
 							cx.waker().wake_by_ref();
 							Poll::Pending
 						}
@@ -151,7 +154,7 @@ impl<'x> Future for WriteIntr<'x, Tx<pac::USART1>> {
 				}
 			}
 			WriteState::Transmitting => {
-				match <Tx<pac::USART1> as UsartTxSlot>::try_borrow_mut() {
+				match <Tx<USART> as UsartTxSlot>::try_borrow_mut() {
 					Ok(mut txop_ref) => {
 						// we are only ever woken using the waker when the transmission is done, hence we don't have to double-check'
 						txop_ref.1.take();
@@ -260,11 +263,11 @@ where
 		match this.state {
 			ReadState::Waiting => {
 				let buf = this.buf.as_mut().unwrap();
-				match <Rx<pac::USART1> as UsartRxSlot>::try_borrow_mut() {
+				match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
 					Ok(mut rxslot) => match rxslot.1 {
 						Some(_) => {
 							// need to wait. we also need to re-enable interrupts, because if we raced with the interrupt handler while acquiring the lock, the interrupt handler has failed to acquire it and disabled interrupts in order to let user code continue to operate.
-							<Rx<pac::USART1> as UsartRxSlot>::drop_and_listen(rxslot);
+							<Rx<USART> as UsartRxSlot>::drop_and_listen(rxslot);
 							cx.waker().wake_by_ref();
 							Poll::Pending
 						}
@@ -282,7 +285,7 @@ where
 								offs: 0,
 							});
 							*this.state = ReadState::Receiving;
-							<Rx<pac::USART1> as UsartRxSlot>::drop_and_listen(rxslot);
+							<Rx<USART> as UsartRxSlot>::drop_and_listen(rxslot);
 							// interrupt will wake us up when done
 							Poll::Pending
 						}
@@ -295,7 +298,7 @@ where
 				}
 			}
 			ReadState::Receiving => {
-				match <Rx<pac::USART1> as UsartRxSlot>::try_borrow_mut() {
+				match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
 					Ok(mut rxslot) => {
 						rxslot.1.take();
 						*this.state = ReadState::Done;
