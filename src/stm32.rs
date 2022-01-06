@@ -45,18 +45,9 @@ pub trait UsartTxSlot {
 
 	fn try_borrow_mut() -> Result<RefMut<'static, TxCellInner<Self::USART>>, TryBorrowError>;
 
-	fn clear_txop() {
-		match Self::try_borrow_mut() {
-			Ok(mut b) => b.1 = None,
-			// This leaks the txop, which means the peripherial is now unusable.
-			Err(_) => (),
-		}
-	}
-
 	fn drop_and_listen(borrow: RefMut<'static, TxCellInner<Self::USART>>);
 }
 
-//#[pin_project(PinnedDrop, project = WriteIntrProj)]
 #[pin_project(PinnedDrop)]
 pub struct WriteIntr<'x, T: UsartTxSlot + 'static> {
 	tx: PhantomData<&'x T>,
@@ -176,7 +167,13 @@ impl<'x, T: UsartTxSlot + 'static> PinnedDrop for WriteIntr<'x, T> {
 		match self.state {
 			// if we set the op up, we're the owner and can cancel it in this way
 			WriteState::Transmitting => {
-				<T as UsartTxSlot>::clear_txop();
+				match <T as UsartTxSlot>::try_borrow_mut() {
+					Ok(mut txop) => txop.1 = None,
+					// this can only happen if this drop is called from within an interrupt handler -- which is always invalid, because this is a future, after all.
+					// we MUST panic here for safety: if we cannot cancel the txop, the interrupt handler will do unspeakable things, because the data we borrowed is now also invalid.
+					// note that the panic doesn't really do much here to that end -- as the interrupt may still fire.
+					Err(_) => panic!("failed to cancel txop in Drop"),
+				}
 			}
 			_ => (),
 		}
@@ -187,14 +184,6 @@ pub trait UsartRxSlot {
 	type USART: 'static;
 
 	fn try_borrow_mut() -> Result<RefMut<'static, RxCellInner<Self::USART>>, TryBorrowError>;
-
-	fn clear_rxop() {
-		match Self::try_borrow_mut() {
-			Ok(mut b) => b.1 = None,
-			// This leaks the txop, which means the peripherial is now unusable.
-			Err(_) => (),
-		}
-	}
 
 	fn drop_and_listen(borrow: RefMut<'static, RxCellInner<Self::USART>>);
 }
@@ -319,7 +308,13 @@ impl<'x, T: UsartRxSlot + 'static> PinnedDrop for ReadIntr<'x, T> {
 		match self.state {
 			// if we set the op up, we're the owner and can cancel it in this way
 			ReadState::Receiving => {
-				<T as UsartRxSlot>::clear_rxop();
+				match <T as UsartRxSlot>::try_borrow_mut() {
+					Ok(mut rxslot) => rxslot.1 = None,
+					// this can only happen if this drop is called from within an interrupt handler -- which is always invalid, because this is a future, after all.
+					// we MUST panic here for safety: if we cannot cancel the txop, the interrupt handler will do unspeakable things, because the data we borrowed is now also invalid.
+					// note that the panic doesn't really do much here to that end -- as the interrupt may still fire.
+					Err(_) => panic!("failed to cancel rxop in Drop"),
+				}
 			}
 			_ => (),
 		}
