@@ -6,9 +6,13 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use pin_project_lite::pin_project;
+use pin_project::pin_project;
 
 pub enum NoReturn {}
+
+pub mod spincell;
+pub mod stm32;
+pub mod usart;
 
 #[repr(transparent)]
 struct WakeupCondition {
@@ -66,13 +70,12 @@ impl WakeupCondition {
 	}
 }
 
-pin_project! {
-	struct Task<T> {
-		#[pin]
-		inner: T,
-		#[pin]
-		wakeup_condition: WakeupCondition,
-	}
+#[pin_project]
+struct Task<T> {
+	#[pin]
+	inner: T,
+	#[pin]
+	wakeup_condition: WakeupCondition,
 }
 
 impl<T> Task<T> {
@@ -243,13 +246,12 @@ impl<T: Monotonic> Monotonic for &T {
 	}
 }
 
-pin_project! {
-	pub struct Executor<A, B> {
-		#[pin]
-		f0: Task<A>,
-		#[pin]
-		f1: Task<B>,
-	}
+#[pin_project]
+pub struct Executor<A, B> {
+	#[pin]
+	f0: Task<A>,
+	#[pin]
+	f1: Task<B>,
 }
 
 impl<A, B> Executor<A, B> {
@@ -288,19 +290,12 @@ impl Future for Yield {
 	}
 }
 
-pub struct Sleep<'x, C: Monotonic> {
+pub struct Sleep<'x, C: Monotonic + ?Sized> {
 	clock: &'x C,
 	until: C::Instant,
 }
 
-pub fn sleep_for<'x, C: Monotonic>(c: &'x C, d: C::Duration) -> Sleep<'x, C> {
-	Sleep {
-		clock: c,
-		until: c.now() + d,
-	}
-}
-
-impl<'x, C: Monotonic> Future for Sleep<'x, C> {
+impl<'x, C: Monotonic + ?Sized> Future for Sleep<'x, C> {
 	type Output = ();
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -310,5 +305,18 @@ impl<'x, C: Monotonic> Future for Sleep<'x, C> {
 
 		cx.waker().wake_by_ref();
 		Poll::Pending
+	}
+}
+
+pub trait MonotonicExt: Monotonic {
+	fn sleep_for(&self, d: Self::Duration) -> Sleep<'_, Self>;
+}
+
+impl<T: Monotonic> MonotonicExt for T {
+	fn sleep_for(&self, d: T::Duration) -> Sleep<'_, T> {
+		Sleep {
+			clock: self,
+			until: self.now() + d,
+		}
 	}
 }

@@ -6,13 +6,15 @@ name = "stm32test"
 version = "0.1.0"
 
 [dependencies]
-cortex-m = "0.6.0"
-cortex-m-rt = "0.6.10"
+cortex-m = { version = "0.6.0" }
 cortex-m-semihosting = "0.3.3"
 panic-halt = "0.2.0"
 cortex-m-rtic = "^0.5"
-lm3s6965 = "^0.1"
-pin-project-lite = "*"
+stm32f1xx-hal = { version = "^0.7", features = ["stm32f100", "medium", "rt"] }
+pin-project = "*"
+embedded-hal = "*"
+nb = "*"
+embedded-dma = "*"
 
 # Uncomment for the panic example.
 # panic-itm = "0.4.1"
