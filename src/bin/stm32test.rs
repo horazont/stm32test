@@ -25,9 +25,11 @@ use stm32test::{Executor, FromTicks, Monotonic, MonotonicExt, SystickClock};
 type Duration = <SystickClock as Monotonic>::Duration;
 
 #[rtic::app(device = stm32f1xx_hal::pac)]
-const APP: () = {
-	struct Resources {
-		clock: SystickClock,
+mod app {
+	use super::*;
+
+	#[local]
+	struct Local {
 		tx: stm32::Tx<pac::USART1>,
 		rx: stm32::Rx<pac::USART1>,
 		led1: stm32f1xx_hal::gpio::gpioc::PC9<
@@ -38,8 +40,13 @@ const APP: () = {
 		>,
 	}
 
+	#[shared]
+	struct Resources {
+		clock: SystickClock,
+	}
+
 	#[init]
-	fn init(_: init::Context) -> init::LateResources {
+	fn init(_: init::Context) -> (Resources, Local, init::Monotonics) {
 		let mut core = unsafe { Peripherals::steal() };
 		core.SYST.set_clock_source(syst::SystClkSource::Core);
 		core.SYST.set_reload(8000);
@@ -50,45 +57,45 @@ const APP: () = {
 		let mut flash = stm32.FLASH.constrain();
 		let mut rcc = stm32.RCC.constrain();
 		let clocks = rcc.cfgr.freeze(&mut flash.acr);
-		let mut gpioc = stm32.GPIOC.split(&mut rcc.apb2);
+		let mut gpioc = stm32.GPIOC.split();
 		let led1 = gpioc.pc9.into_push_pull_output(&mut gpioc.crh);
 		let led2 = gpioc.pc8.into_push_pull_output(&mut gpioc.crh);
-		let mut gpioa = stm32.GPIOA.split(&mut rcc.apb2);
-		let mut afio = stm32.AFIO.constrain(&mut rcc.apb2);
+		let mut gpioa = stm32.GPIOA.split();
+		let mut afio = stm32.AFIO.constrain();
 		let pin_tx = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
 		let pin_rx = gpioa.pa10;
 		{
-			// let rcc = unsafe { &(*stm32f1xx_hal::pac::RCC::ptr()) };
-			stm32f1xx_hal::pac::DMA1::enable(&mut rcc.ahb);
+			let rcc = unsafe { &(*stm32f1xx_hal::pac::RCC::ptr()) };
+			stm32f1xx_hal::pac::DMA1::enable(rcc);
 		}
-		let ch4 = stm32.DMA1.split(&mut rcc.ahb).4;
+		let ch4 = stm32.DMA1.split().4;
 		let serial = stm32f1xx_hal::serial::Serial::usart1(
 			stm32.USART1,
 			(pin_tx, pin_rx),
 			&mut afio.mapr,
 			stm32f1xx_hal::serial::Config::default().baudrate(300.bps()),
 			clocks,
-			&mut rcc.apb2,
 		);
 
 		let (tx, rx) = stm32::Serial::wrap(serial).split();
 
-		init::LateResources {
+		(Resources {
 			clock: SystickClock::new(),
+		}, Local{
 			led1,
 			led2,
 			tx,
 			rx,
-		}
+		}, init::Monotonics())
 	}
 
-	#[idle(resources = [&clock, led1, led2, tx, rx])]
+	#[idle(shared = [&clock], local = [led1, led2, tx, rx])]
 	fn idle(cx: idle::Context) -> ! {
-		let led1 = cx.resources.led1;
-		let led2 = cx.resources.led2;
-		let tx = cx.resources.tx;
-		let rx = cx.resources.rx;
-		let clock = cx.resources.clock;
+		let led1 = cx.local.led1;
+		let led2 = cx.local.led2;
+		let tx = cx.local.tx;
+		let rx = cx.local.rx;
+		let clock = cx.shared.clock;
 		let mut executor = Executor::new(
 			async move {
 				loop {
@@ -121,13 +128,13 @@ const APP: () = {
 		}
 	}
 
-	#[task(binds = SysTick, resources = [&clock])]
-	fn SysTick(cx: SysTick::Context) {
-		cx.resources.clock.tick();
+	#[task(binds = SysTick, shared = [&clock])]
+	fn systick(cx: systick::Context) {
+		cx.shared.clock.tick();
 	}
 
 	#[task(binds = USART1)]
-	fn USART1(cx: USART1::Context) {
+	fn usart1(cx: usart1::Context) {
 		stm32::usart1_interrupt();
 	}
-};
+}

@@ -1,16 +1,15 @@
 [package]
 authors = ["Jonas Schäfer <jonas@zombofant.net>"]
-edition = "2018"
+edition = "2021"
 readme = "README.md"
 name = "stm32test"
 version = "0.1.0"
 
 [dependencies]
-cortex-m = { version = "0.6.0" }
-cortex-m-semihosting = "0.3.3"
+cortex-m = "*"
 panic-halt = "0.2.0"
-cortex-m-rtic = "^0.5"
-stm32f1xx-hal = { version = "^0.7", features = ["stm32f100", "medium", "rt"] }
+cortex-m-rtic = "^1"
+stm32f1xx-hal = { version = "^0.8", features = ["stm32f100", "medium", "rt"] }
 pin-project = "*"
 embedded-hal = "*"
 nb = "*"
