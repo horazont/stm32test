@@ -4,7 +4,7 @@
 use embedded_hal::digital::v2::OutputPin;
 use stm32f1xx_hal::prelude::*;
 use stm32f1xx_hal::{
-	pac,
+	pac, rcc,
 	rcc::{Enable, Reset},
 };
 
@@ -30,8 +30,7 @@ mod app {
 
 	#[local]
 	struct Local {
-		tx: stm32::Tx<pac::USART1>,
-		rx: stm32::Rx<pac::USART1>,
+		serial: stm32::Serial<pac::USART1>,
 		led1: stm32f1xx_hal::gpio::gpioc::PC9<
 			stm32f1xx_hal::gpio::Output<stm32f1xx_hal::gpio::PushPull>,
 		>,
@@ -43,6 +42,7 @@ mod app {
 	#[shared]
 	struct Resources {
 		clock: SystickClock,
+		clocks: rcc::Clocks,
 	}
 
 	#[init]
@@ -69,7 +69,7 @@ mod app {
 			stm32f1xx_hal::pac::DMA1::enable(rcc);
 		}
 		let ch4 = stm32.DMA1.split().4;
-		let serial = stm32f1xx_hal::serial::Serial::usart1(
+		let mut serial = stm32f1xx_hal::serial::Serial::usart1(
 			stm32.USART1,
 			(pin_tx, pin_rx),
 			&mut afio.mapr,
@@ -77,25 +77,25 @@ mod app {
 			clocks,
 		);
 
-		let (tx, rx) = stm32::Serial::wrap(serial).split();
+		let serial = stm32::Serial::wrap(serial.erase());
 
-		(Resources {
-			clock: SystickClock::new(),
-		}, Local{
-			led1,
-			led2,
-			tx,
-			rx,
-		}, init::Monotonics())
+		(
+			Resources {
+				clock: SystickClock::new(),
+				clocks,
+			},
+			Local { led1, led2, serial },
+			init::Monotonics(),
+		)
 	}
 
-	#[idle(shared = [&clock], local = [led1, led2, tx, rx])]
+	#[idle(shared = [&clock, &clocks], local = [led1, led2, serial])]
 	fn idle(cx: idle::Context) -> ! {
 		let led1 = cx.local.led1;
 		let led2 = cx.local.led2;
-		let tx = cx.local.tx;
-		let rx = cx.local.rx;
+		let serial = cx.local.serial;
 		let clock = cx.shared.clock;
+		let clocks = cx.shared.clocks;
 		let mut executor = Executor::new(
 			async move {
 				loop {
@@ -107,6 +107,14 @@ mod app {
 				}
 			},
 			async move {
+				serial.write(&b"Hello slow World!"[..]).await;
+				serial
+					.reconfigure(
+						stm32f1xx_hal::serial::Config::default().baudrate(115_200.bps()),
+						*clocks,
+					)
+					.await;
+
 				let mut buf: [u8; 1] = [0u8; 1];
 				loop {
 					/* led2.set_high();
@@ -114,9 +122,9 @@ mod app {
 					led2.set_low();
 					clock.sleep_for(Duration::from_ticks(1000)).await; */
 					led2.set_high();
-					rx.read(&mut buf[..]).await;
+					serial.read(&mut buf[..]).await;
 					led2.set_low();
-					tx.write(&buf[..]).await;
+					serial.write(&buf[..]).await;
 				}
 			},
 		);
