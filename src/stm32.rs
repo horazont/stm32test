@@ -168,7 +168,7 @@ pub trait UsartTxSlot {
 	fn drop_and_listen(borrow: RefMut<'static, TxCellInner<Self::USART>>);
 }
 
-#[pin_project(PinnedDrop)]
+#[pin_project(PinnedDrop, !Unpin)]
 pub struct WriteIntr<'x, T: UsartTxSlot + 'static> {
 	tx: PhantomData<&'x T>,
 	buf: &'x [u8],
@@ -341,7 +341,7 @@ where
 
 	pub fn read<'x, B: Into<&'x mut [u8]>>(&'x self, buf: B) -> ReadIntr<'x, Self> {
 		ReadIntr {
-			rx: self,
+			rx: PhantomData,
 			state: ReadState::Waiting,
 			buf: Some(buf.into()),
 		}
@@ -354,9 +354,9 @@ enum ReadState {
 	Done,
 }
 
-#[pin_project(PinnedDrop)]
+#[pin_project(PinnedDrop, !Unpin)]
 pub struct ReadIntr<'x, T: UsartRxSlot + 'static> {
-	rx: &'x T,
+	rx: PhantomData<&'x T>,
 	buf: Option<&'x mut [u8]>,
 	state: ReadState,
 }
