@@ -1,3 +1,4 @@
+#![feature(generic_associated_types)]
 #![no_std]
 use core::cmp;
 use core::future::Future;
@@ -11,9 +12,9 @@ use pin_project::pin_project;
 pub enum NoReturn {}
 
 pub mod crc8;
+pub mod onewire;
 pub mod spincell;
 pub mod stm32;
-pub mod stm32_onewire;
 pub mod usart;
 
 #[repr(transparent)]

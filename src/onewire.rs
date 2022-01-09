@@ -4,14 +4,18 @@ use core::task::{Context, Poll};
 
 use pin_project::pin_project;
 
-use stm32f1xx_hal::prelude::*;
-use stm32f1xx_hal::{rcc, serial};
+use crate::usart;
+use crate::usart::AsyncSetBaudRateExt;
 
-use crate::stm32;
-
-pub struct OneWire<USART> {
-	inner: stm32::Serial<USART>,
-	clocks: rcc::Clocks,
+pub struct OneWire<
+	T: usart::AsyncSetBaudRate
+		+ usart::AsyncRead<u8>
+		+ usart::AsyncWrite<u8>
+		+ embedded_hal::serial::Read<u8>,
+> {
+	inner: T,
+	reset_rate: T::BaudRate,
+	data_rate: T::BaudRate,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,30 +59,32 @@ fn get_bit(addr: &DeviceAddress, bit: u8) -> bool {
 	addr[byteaddr as usize] & (1 << bitoffs) != 0
 }
 
-impl<'x, USART: 'static> OneWire<USART>
-where
-	stm32::Tx<USART>: stm32::UsartTxSlot<USART = USART>,
-	stm32::Rx<USART>: stm32::UsartRxSlot<USART = USART>,
-	USART: stm32f1xx_hal::serial::Instance,
+impl<
+		B: Clone + 'static,
+		T: usart::AsyncSetBaudRate<BaudRate = B>
+			+ usart::AsyncRead<u8>
+			+ usart::AsyncWrite<u8>
+			+ embedded_hal::serial::Read<u8>,
+	> OneWire<T>
 {
-	pub fn new(serial: stm32::Serial<USART>, clocks: rcc::Clocks) -> Self {
+	pub fn new<V: usart::BaudRateGenerator<B>>(serial: T, gen: &V) -> Self {
 		Self {
 			inner: serial,
-			clocks,
+			reset_rate: gen.calc_baud_rate(9_600),
+			data_rate: gen.calc_baud_rate(115_200),
 		}
 	}
 
 	pub async fn reset(&mut self) -> OneWireStatus {
 		self.inner
-			.reconfigure(serial::Config::default().baudrate(9_600.bps()), self.clocks)
-			.await;
+			.set_baud_rate(self.reset_rate.clone())
+			.await
+			.unwrap();
 		let echo = self.probe(0xf0).await;
 		self.inner
-			.reconfigure(
-				serial::Config::default().baudrate(115_200.bps()),
-				self.clocks,
-			)
-			.await;
+			.set_baud_rate(self.data_rate.clone())
+			.await
+			.unwrap();
 		if echo & 0xf0 < 0xf0 {
 			OneWireStatus::Presence
 		} else {
@@ -88,9 +94,15 @@ where
 
 	async fn probe(&mut self, mut signal: u8) -> u8 {
 		// before writing, we need to ensure that the usart rx is clear. it might not be clear if we have noise on the line.
-		self.inner.read_rx_register();
-		self.inner.write(core::slice::from_ref(&signal)).await;
-		self.inner.read(core::slice::from_mut(&mut signal)).await;
+		// we explicitly do not care about success/failure here
+		let _ = embedded_hal::serial::Read::<u8>::read(&mut self.inner);
+		self.inner
+			.write(core::slice::from_ref(&signal))
+			.await
+			.unwrap();
+		usart::AsyncRead::<u8>::read(&mut self.inner, core::slice::from_mut(&mut signal))
+			.await
+			.unwrap();
 		signal
 	}
 
@@ -113,7 +125,7 @@ where
 	pub async fn write_bytes(&mut self, bytes: &[u8]) {
 		for byte in bytes.iter() {
 			let mut byte = *byte;
-			for bitoffs in 0..8 {
+			for _ in 0..8 {
 				let bit = byte & 0x1;
 				byte = byte >> 1;
 				if bit != 0 {
@@ -131,7 +143,7 @@ where
 			for bitoffs in 0..8 {
 				let bit = self.bit_read().await;
 				if bit {
-					byte_buf |= (1 << bitoffs);
+					byte_buf |= 1 << bitoffs;
 				}
 			}
 			buf[i] = byte_buf;

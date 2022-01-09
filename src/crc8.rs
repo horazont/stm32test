@@ -1,6 +1,6 @@
-pub struct Crc8<const Poly: u8>(u8);
+pub struct Crc8<const POLY: u8>(u8);
 
-impl<const Poly: u8> Crc8<Poly> {
+impl<const POLY: u8> Crc8<POLY> {
 	pub const fn new() -> Self {
 		Self(0)
 	}
@@ -12,7 +12,7 @@ impl<const Poly: u8> Crc8<Poly> {
 	pub fn feed(&mut self, byte: u8) -> u8 {
 		for bit in 0..8 {
 			if ((self.0 >> 7) & 1) != ((byte >> bit) & 1) {
-				self.0 = (self.0 << 1) ^ Poly;
+				self.0 = (self.0 << 1) ^ POLY;
 			} else {
 				self.0 = self.0 << 1;
 			}

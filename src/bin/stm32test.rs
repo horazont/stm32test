@@ -1,12 +1,8 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::OutputPin;
 use stm32f1xx_hal::prelude::*;
-use stm32f1xx_hal::{
-	pac, rcc,
-	rcc::{Enable, Reset},
-};
+use stm32f1xx_hal::{pac, rcc, rcc::Enable};
 
 // pick a panicking behavior
 use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
@@ -18,8 +14,7 @@ use core::pin::Pin;
 use cortex_m::peripheral::{syst, Peripherals};
 // use cortex_m_semihosting::{debug, hprintln};
 
-use stm32test::usart::{WakeSource, WriteExt};
-use stm32test::{stm32, stm32_onewire};
+use stm32test::{onewire, stm32};
 use stm32test::{Executor, FromTicks, Monotonic, MonotonicExt, SystickClock};
 
 type Duration = <SystickClock as Monotonic>::Duration;
@@ -40,7 +35,7 @@ mod app {
 	struct Local {
 		tx: stm32::Tx<pac::USART1>,
 		rx: stm32::Rx<pac::USART1>,
-		onewire: stm32_onewire::OneWire<pac::USART3>,
+		onewire: onewire::OneWire<stm32::Serial<pac::USART3>>,
 		led1: stm32f1xx_hal::gpio::gpioc::PC9<
 			stm32f1xx_hal::gpio::Output<stm32f1xx_hal::gpio::PushPull>,
 		>,
@@ -80,7 +75,6 @@ mod app {
 				let rcc = unsafe { &(*stm32f1xx_hal::pac::RCC::ptr()) };
 				stm32f1xx_hal::pac::DMA1::enable(rcc);
 			}
-			let ch4 = stm32.DMA1.split().4;
 			let mut serial = stm32f1xx_hal::serial::Serial::usart1(
 				stm32.USART1,
 				(pin_tx, pin_rx),
@@ -104,7 +98,10 @@ mod app {
 				clocks,
 			);
 
-			stm32_onewire::OneWire::new(stm32::Serial::wrap(serial.erase()), clocks)
+			onewire::OneWire::new(
+				stm32::Serial::wrap(serial.erase()),
+				&stm32::BaudRateFromClocks(&clocks),
+			)
 		};
 
 		let (tx, rx) = serial.split();
@@ -133,7 +130,6 @@ mod app {
 		let tx2 = cx.local.tx;
 		let rx = cx.local.rx;
 		let clock = cx.shared.clock;
-		let clocks = cx.shared.clocks;
 		let onewire = cx.local.onewire;
 		let mut executor = Executor::new(
 			async move {
@@ -148,8 +144,8 @@ mod app {
 					led1.set_high();
 					tx2.write(&b"sampling ...\n"[..]).await;
 					match onewire.reset().await {
-						stm32_onewire::OneWireStatus::Presence => (),
-						stm32_onewire::OneWireStatus::Empty => {
+						onewire::OneWireStatus::Presence => (),
+						onewire::OneWireStatus::Empty => {
 							tx2.write(&b"no devices\n"[..]).await;
 							clock.sleep_for(Duration::from_ticks(10000)).await;
 							continue;
@@ -157,15 +153,15 @@ mod app {
 					}
 					// 0x44 = DS18B20 command to sample temperature
 					onewire
-						.write_bytes(&[stm32_onewire::Command::Broadcast as u8, 0x44][..])
+						.write_bytes(&[onewire::Command::Broadcast as u8, 0x44][..])
 						.await;
 					clock.sleep_for(Duration::from_ticks(1500)).await;
 
-					let mut addr = stm32_onewire::ZERO_ADDR;
+					let mut addr = onewire::ZERO_ADDR;
 					tx2.write(&b"scanning\n"[..]).await;
 					loop {
 						match onewire.find_next(&mut addr).await {
-							Ok(stm32_onewire::OneWireStatus::Presence) => {
+							Ok(onewire::OneWireStatus::Presence) => {
 								led2.set_high();
 								for byte in addr.iter() {
 									let hi = (byte & 0xf0) >> 4;
@@ -194,14 +190,14 @@ mod app {
 								clock.sleep_for(Duration::from_ticks(100)).await;
 								led2.set_low();
 							}
-							Ok(stm32_onewire::OneWireStatus::Empty) => {
+							Ok(onewire::OneWireStatus::Empty) => {
 								led2.set_high();
 								tx2.write(&b"scan done\n"[..]).await;
 								clock.sleep_for(Duration::from_ticks(1000)).await;
 								led2.set_low();
 								break;
 							}
-							Err(stm32_onewire::SearchError::Vanished) => {
+							Err(onewire::SearchError::Vanished) => {
 								led1.set_low();
 								tx2.write(&b"vanished\n"[..]).await;
 								clock.sleep_for(Duration::from_ticks(100)).await;
@@ -238,12 +234,12 @@ mod app {
 	}
 
 	#[task(binds = USART1)]
-	fn usart1(cx: usart1::Context) {
+	fn usart1(_cx: usart1::Context) {
 		stm32::usart1_interrupt();
 	}
 
 	#[task(binds = USART3)]
-	fn usart3(cx: usart3::Context) {
+	fn usart3(_cx: usart3::Context) {
 		stm32::usart3_interrupt();
 	}
 }

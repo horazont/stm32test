@@ -1,3 +1,4 @@
+use core::convert::Infallible;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -12,6 +13,8 @@ use stm32f1xx_hal::prelude::*;
 use stm32f1xx_hal::{pac, rcc, serial};
 
 use super::spincell::{RefMut, SpinCell, TryBorrowError};
+
+use crate::usart;
 
 pub struct Serial<USART> {
 	tx: Tx<USART>,
@@ -45,16 +48,6 @@ where
 		}
 	}
 
-	pub fn read_rx_register(&mut self) -> Result<Option<u8>, TryBorrowError> {
-		let mut rxslot = <Rx<USART> as UsartRxSlot>::try_borrow_mut()?;
-		let mut rx = rxslot.0.as_mut().unwrap();
-		if rx.is_rx_not_empty() {
-			Ok(rx.read().ok())
-		} else {
-			Ok(None)
-		}
-	}
-
 	pub fn write<'x, B: Into<&'x [u8]> + 'x>(&'x self, buf: B) -> WriteIntr<'x, Tx<USART>> {
 		WriteIntr {
 			tx: PhantomData,
@@ -73,6 +66,132 @@ where
 
 	pub fn split(self) -> (Tx<USART>, Rx<USART>) {
 		(self.tx, self.rx)
+	}
+}
+
+impl<USART: 'static> usart::AsyncWrite<u8> for Serial<USART>
+where
+	Tx<USART>: UsartTxSlot<USART = USART>,
+	Rx<USART>: UsartRxSlot<USART = USART>,
+	USART: serial::Instance,
+{
+	type Error = Infallible;
+	type Future<'x> = WriteIntr<'x, Tx<USART>>;
+
+	fn write<'x>(&'x mut self, buf: &'x [u8]) -> Self::Future<'x> {
+		WriteIntr {
+			tx: PhantomData,
+			state: WriteState::Waiting,
+			buf: buf,
+		}
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct BaudRateConfig {
+	config: serial::Config,
+	clocks: rcc::Clocks,
+}
+
+pub struct BaudRateFromClocks<'x>(pub &'x rcc::Clocks);
+
+impl<'x> usart::BaudRateGenerator<BaudRateConfig> for BaudRateFromClocks<'x> {
+	fn calc_baud_rate(&self, bps: u32) -> BaudRateConfig {
+		BaudRateConfig {
+			config: serial::Config::default().baudrate(bps.bps()),
+			clocks: *self.0,
+		}
+	}
+}
+
+impl<USART: 'static> usart::AsyncSetBaudRate for Serial<USART>
+where
+	Tx<USART>: UsartTxSlot<USART = USART>,
+	Rx<USART>: UsartRxSlot<USART = USART>,
+	USART: serial::Instance,
+{
+	type Error = Infallible;
+	type BaudRate = BaudRateConfig;
+
+	fn poll_set_baud_rate(
+		&'_ mut self,
+		rate: &Self::BaudRate,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(), Self::Error>> {
+		let mut txslot = match <Tx<USART> as UsartTxSlot>::try_borrow_mut() {
+			Ok(slot) => slot,
+			Err(_) => panic!("failed to lock usart for reconfiguration"),
+		};
+		// there can be no Tx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
+		assert!(txslot.1.is_none());
+		let mut rxslot = match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
+			Ok(slot) => slot,
+			Err(_) => panic!("failed to lock usart for reconfiguration"),
+		};
+		// there can be no Rx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
+		assert!(rxslot.1.is_none());
+
+		let mut serial = rxslot.0.take().unwrap().reunite(txslot.0.take().unwrap());
+		let result = match serial.reconfigure(rate.config, rate.clocks) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(nb::Error::WouldBlock) => {
+				// we have to spin on this
+				cx.waker().wake_by_ref();
+				Poll::Pending
+			}
+			Err(nb::Error::Other(_)) => unreachable!(),
+		};
+		let (tx, rx) = serial.split();
+		rxslot.0 = Some(rx);
+		txslot.0 = Some(tx);
+
+		// as nothing is in progress, we do not need to re-enable interrupts
+		result
+	}
+}
+
+impl<USART: 'static> usart::AsyncRead<u8> for Serial<USART>
+where
+	Tx<USART>: UsartTxSlot<USART = USART>,
+	Rx<USART>: UsartRxSlot<USART = USART>,
+	USART: serial::Instance,
+{
+	type Error = Infallible;
+	type Future<'x> = ReadIntr<'x, Rx<USART>>;
+
+	fn read<'x>(&'x mut self, buf: &'x mut [u8]) -> Self::Future<'x> {
+		ReadIntr {
+			rx: PhantomData,
+			state: ReadState::Waiting,
+			buf: Some(buf),
+		}
+	}
+}
+
+pub enum SyncError {
+	Locked(TryBorrowError),
+	Serial(serial::Error),
+}
+
+impl<USART: 'static> embedded_hal::serial::Read<u8> for Serial<USART>
+where
+	Tx<USART>: UsartTxSlot<USART = USART>,
+	Rx<USART>: UsartRxSlot<USART = USART>,
+	USART: serial::Instance,
+{
+	type Error = SyncError;
+
+	fn read(&mut self) -> nb::Result<u8, Self::Error> {
+		let mut rxslot = match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
+			Ok(slot) => slot,
+			Err(e) => return Err(nb::Error::Other(SyncError::Locked(e))),
+		};
+		let rx = rxslot.0.as_mut().unwrap();
+		match rx.read() {
+			Ok(v) => Ok(v),
+			Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+			Err(nb::Error::Other(e)) => Err(nb::Error::Other(SyncError::Serial(e))),
+		}
 	}
 }
 
@@ -237,7 +356,7 @@ where
 			*this.serial = Some(serial);
 		}
 
-		let mut serial = this.serial.as_mut().unwrap();
+		let serial = this.serial.as_mut().unwrap();
 		match serial.reconfigure(*this.config, *this.clocks) {
 			Ok(()) => {
 				drop(serial);
@@ -337,7 +456,7 @@ impl<'x, USART> Future for WriteIntr<'x, Tx<USART>>
 where
 	Tx<USART>: UsartTxSlot,
 {
-	type Output = ();
+	type Output = Result<usize, Infallible>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
@@ -380,7 +499,7 @@ where
 						// we are only ever woken using the waker when the transmission is done, hence we don't have to double-check'
 						txop_ref.1.take();
 						*this.state = WriteState::Done;
-						Poll::Ready(())
+						Poll::Ready(Ok(this.buf.len()))
 					}
 					// we will get notified when it's done
 					Err(_) => Poll::Pending,
@@ -459,7 +578,7 @@ impl<'x, USART> Future for ReadIntr<'x, Rx<USART>>
 where
 	Rx<USART>: UsartRxSlot,
 {
-	type Output = ();
+	type Output = Result<(), Infallible>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
@@ -505,7 +624,7 @@ where
 					Ok(mut rxslot) => {
 						rxslot.1.take();
 						*this.state = ReadState::Done;
-						Poll::Ready(())
+						Poll::Ready(Ok(()))
 					}
 					// we'll get re-notified when it's done, or will we?
 					Err(_) => Poll::Pending,

@@ -1,73 +1,67 @@
+use core::fmt::Debug;
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll, Waker};
+use core::task::{Context, Poll};
 
 use pin_project::pin_project;
 
-use embedded_hal::serial;
+pub trait AsyncWrite<Word> {
+	type Error: Debug;
+	type Future<'x>: Future<Output = Result<usize, Self::Error>> + 'x
+	where
+		Self: 'x,
+		Word: 'x;
 
-#[pin_project]
-pub struct WriteWord<T> {
-	inner: T,
-	value: u8,
+	fn write<'x>(&'x mut self, buf: &'x [Word]) -> Self::Future<'x>;
 }
 
-impl<T: serial::Write<u8>> Future for WriteWord<T> {
-	type Output = Result<(), T::Error>;
+pub trait AsyncRead<Word> {
+	type Error: Debug;
+	type Future<'x>: Future<Output = Result<(), Self::Error>> + 'x
+	where
+		Self: 'x,
+		Word: 'x;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.project();
-		match this.inner.write(*this.value) {
-			Err(nb::Error::WouldBlock) => {
-				cx.waker().wake_by_ref();
-				Poll::Pending
-			}
-			Err(nb::Error::Other(e)) => Poll::Ready(Err(e)),
-			Ok(()) => Poll::Ready(Ok(())),
-		}
-	}
+	fn read<'x>(&'x mut self, buf: &'x mut [Word]) -> Self::Future<'x>;
+}
+
+pub trait AsyncSetBaudRate {
+	type Error: Debug;
+	type BaudRate;
+
+	fn poll_set_baud_rate(
+		&'_ mut self,
+		rate: &Self::BaudRate,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(), Self::Error>>;
+}
+
+pub trait BaudRateGenerator<T> {
+	fn calc_baud_rate(&self, bps: u32) -> T;
 }
 
 #[pin_project]
-pub struct WriteBuf<'x, T: ?Sized> {
+pub struct SetBaudRate<'x, T: AsyncSetBaudRate + ?Sized> {
+	rate: T::BaudRate,
+	#[pin]
 	inner: &'x mut T,
-	value: &'x [u8],
 }
 
-impl<'x, T: serial::Write<u8> + ?Sized> Future for WriteBuf<'x, T> {
+impl<'x, T: AsyncSetBaudRate> Future for SetBaudRate<'x, T> {
 	type Output = Result<(), T::Error>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.project();
-		while this.value.len() > 0 {
-			match this.inner.write(this.value[0]) {
-				Err(nb::Error::WouldBlock) => {
-					cx.waker().wake_by_ref();
-					return Poll::Pending;
-				}
-				Err(nb::Error::Other(e)) => return Poll::Ready(Err(e)),
-				Ok(()) => {
-					*this.value = this.value.split_at(1).1;
-				}
-			}
-		}
-		Poll::Ready(Ok(()))
+		let mut this = self.project();
+		this.inner.poll_set_baud_rate(this.rate, cx)
 	}
 }
 
-pub trait WakeSource {
-	fn set_waker(&self, waker: Waker);
+pub trait AsyncSetBaudRateExt: AsyncSetBaudRate {
+	fn set_baud_rate(&mut self, rate: Self::BaudRate) -> SetBaudRate<'_, Self>;
 }
 
-pub trait WriteExt: serial::Write<u8> {
-	fn write_buf<'x>(&'x mut self, buf: &'x [u8]) -> WriteBuf<'x, Self>;
-}
-
-impl<T: serial::Write<u8>> WriteExt for T {
-	fn write_buf<'x>(&'x mut self, buf: &'x [u8]) -> WriteBuf<'x, Self> {
-		WriteBuf {
-			inner: self,
-			value: buf,
-		}
+impl<T: AsyncSetBaudRate> AsyncSetBaudRateExt for T {
+	fn set_baud_rate(&mut self, rate: Self::BaudRate) -> SetBaudRate<'_, Self> {
+		SetBaudRate { inner: self, rate }
 	}
 }
