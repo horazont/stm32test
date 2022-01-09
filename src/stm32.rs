@@ -8,7 +8,7 @@ use embedded_dma::{ReadBuffer, StaticReadBuffer, StaticWriteBuffer, WriteBuffer}
 
 use pin_project::{pin_project, pinned_drop};
 
-use stm32f1xx_hal;
+use stm32f1xx_hal::prelude::*;
 use stm32f1xx_hal::{pac, rcc, serial};
 
 use super::spincell::{RefMut, SpinCell, TryBorrowError};
@@ -18,7 +18,7 @@ pub struct Serial<USART> {
 	rx: Rx<USART>,
 }
 
-impl<USART> Serial<USART>
+impl<USART: 'static> Serial<USART>
 where
 	Tx<USART>: UsartTxSlot<USART = USART>,
 	Rx<USART>: UsartRxSlot<USART = USART>,
@@ -45,6 +45,16 @@ where
 		}
 	}
 
+	pub fn read_rx_register(&mut self) -> Result<Option<u8>, TryBorrowError> {
+		let mut rxslot = <Rx<USART> as UsartRxSlot>::try_borrow_mut()?;
+		let mut rx = rxslot.0.as_mut().unwrap();
+		if rx.is_rx_not_empty() {
+			Ok(rx.read().ok())
+		} else {
+			Ok(None)
+		}
+	}
+
 	pub fn write<'x, B: Into<&'x [u8]> + 'x>(&'x self, buf: B) -> WriteIntr<'x, Tx<USART>> {
 		WriteIntr {
 			tx: PhantomData,
@@ -60,13 +70,129 @@ where
 			buf: Some(buf.into()),
 		}
 	}
-}
 
-impl Serial<pac::USART1> {
-	pub fn split(self) -> (Tx<pac::USART1>, Rx<pac::USART1>) {
+	pub fn split(self) -> (Tx<USART>, Rx<USART>) {
 		(self.tx, self.rx)
 	}
 }
+
+macro_rules! serial {
+	($txslot:ident, $rxslot:ident, $usart:ty, $intr:ident) => {
+		static $txslot: TxCell<$usart> = TxCell::new();
+		static $rxslot: RxCell<$usart> = RxCell::new();
+
+		impl UsartTxSlot for Tx<$usart> {
+			type USART = $usart;
+
+			fn try_borrow_mut() -> Result<RefMut<'static, TxCellInner<Self::USART>>, TryBorrowError>
+			{
+				$txslot.inner.try_borrow_mut()
+			}
+
+			fn drop_and_listen(mut borrow: RefMut<'static, TxCellInner<Self::USART>>) {
+				// this is nasty! :)
+				// SAFETY: enabling the interrupt should be a more-or-less safe operation, even while we don't technically own the peripherial.
+				borrow.0.as_mut().unwrap().unlisten();
+				let stolen = unsafe { borrow.steal() };
+				stolen.0.as_mut().unwrap().listen();
+			}
+		}
+
+		impl UsartRxSlot for Rx<$usart> {
+			type USART = $usart;
+
+			fn try_borrow_mut() -> Result<RefMut<'static, RxCellInner<Self::USART>>, TryBorrowError>
+			{
+				$rxslot.inner.try_borrow_mut()
+			}
+
+			fn drop_and_listen(mut borrow: RefMut<'static, RxCellInner<Self::USART>>) {
+				// this is nasty! :)
+				// SAFETY: enabling the interrupt should be a more-or-less safe operation, even while we don't technically own the peripherial.
+				borrow.0.as_mut().unwrap().unlisten();
+				let stolen = unsafe { borrow.steal() };
+				stolen.0.as_mut().unwrap().listen();
+			}
+		}
+
+		pub fn $intr() {
+			// So the thing is: we *have* to do things in the interrupt handler in order to prevent interrupts from firing *continuously*.
+			// In particular, we have to clear the interrupt flags.
+			let usart = unsafe { &*<$usart>::ptr() };
+			let sr = usart.sr.read();
+			if sr.txe().bit_is_set() {
+				// transmit interrupt
+				let disable_interrupts = match $txslot.try_borrow_mut() {
+					Ok(mut b) => match b.1.as_mut() {
+						Some(mut txop_ref) => {
+							if txop_ref.buf.len() > 0 {
+								let ch = txop_ref.buf[0];
+								txop_ref.buf = txop_ref.buf.split_at(1).1;
+								usart.dr.write(|w| w.dr().bits(ch as u16));
+							}
+							if txop_ref.buf.len() == 0 {
+								// all we can do is try to re-trigger the task... we cannot drop the op because the Future's Drop will do that eventually.
+								txop_ref.waker.wake_by_ref();
+								true
+							} else {
+								false
+							}
+						}
+						None => {
+							// disable the interrupts: there is nothing to do.
+							true
+						}
+					},
+					Err(_) => {
+						// this is a problem: the main code is holding the lock while we're interrupting. this may happen rarely, so we have to disable interrupts to give the main code a chance to re-enable them.
+						true
+					}
+				};
+				if disable_interrupts {
+					usart
+						.cr1
+						.modify(|_, w| w.tcie().clear_bit().txeie().clear_bit());
+				}
+			}
+			if sr.rxne().bit_is_set() {
+				let disable_interrupts = match $rxslot.try_borrow_mut() {
+					Ok(mut b) => match b.1.as_mut() {
+						Some(mut rxop_ref) => {
+							if rxop_ref.offs < rxop_ref.buf.len() {
+								let ch = usart.dr.read().dr().bits() as u8;
+								unsafe { rxop_ref.buf[rxop_ref.offs].as_mut_ptr().write(ch) };
+								rxop_ref.offs += 1;
+							}
+							if rxop_ref.offs >= rxop_ref.buf.len() {
+								rxop_ref.waker.wake_by_ref();
+								// disable interrupts, we're done with this transfer.
+								true
+							} else {
+								// there is more to do, wait for the next rxne.
+								false
+							}
+						}
+						// disable interrupts, there is nothing to do.
+						None => true,
+					},
+					Err(_) => {
+						// this is a problem: the main code is holding the lock while we're interrupting. this may happen rarely, so we have to disable interrupts to give the main code a chance to re-enable them.
+						true
+					}
+				};
+				if disable_interrupts {
+					usart.cr1.modify(|_, w| w.rxneie().clear_bit());
+				}
+			}
+		}
+	};
+}
+
+serial!(TX1_SLOT, RX1_SLOT, pac::USART1, usart1_interrupt);
+
+serial!(TX2_SLOT, RX2_SLOT, pac::USART2, usart2_interrupt);
+
+serial!(TX3_SLOT, RX3_SLOT, pac::USART3, usart3_interrupt);
 
 #[pin_project(PinnedDrop, !Unpin)]
 pub struct Reconfigure<'x, USART: 'static>
@@ -187,22 +313,6 @@ impl<USART> Clone for Tx<USART> {
 	}
 }
 
-impl UsartTxSlot for Tx<pac::USART1> {
-	type USART = pac::USART1;
-
-	fn try_borrow_mut() -> Result<RefMut<'static, TxCellInner<Self::USART>>, TryBorrowError> {
-		TX1_SLOT.inner.try_borrow_mut()
-	}
-
-	fn drop_and_listen(mut borrow: RefMut<'static, TxCellInner<Self::USART>>) {
-		// this is nasty! :)
-		// SAFETY: enabling the interrupt should be a more-or-less safe operation, even while we don't technically own the peripherial.
-		borrow.0.as_mut().unwrap().unlisten();
-		let stolen = unsafe { borrow.steal() };
-		stolen.0.as_mut().unwrap().listen();
-	}
-}
-
 impl<USART> Tx<USART>
 where
 	Tx<USART>: UsartTxSlot,
@@ -310,22 +420,6 @@ pub trait UsartRxSlot {
 
 pub struct Rx<USART> {
 	phantom: PhantomData<USART>,
-}
-
-impl UsartRxSlot for Rx<pac::USART1> {
-	type USART = pac::USART1;
-
-	fn try_borrow_mut() -> Result<RefMut<'static, RxCellInner<Self::USART>>, TryBorrowError> {
-		RX1_SLOT.inner.try_borrow_mut()
-	}
-
-	fn drop_and_listen(mut borrow: RefMut<'static, RxCellInner<Self::USART>>) {
-		// this is nasty! :)
-		// SAFETY: enabling the interrupt should be a more-or-less safe operation, even while we don't technically own the peripherial.
-		borrow.0.as_mut().unwrap().unlisten();
-		let stolen = unsafe { borrow.steal() };
-		stolen.0.as_mut().unwrap().listen();
-	}
 }
 
 impl<USART> Rx<USART>
@@ -471,9 +565,6 @@ impl<USART: 'static> TxCell<USART> {
 	}
 }
 
-/// Hold the waker, the buffer and the flag which indicates completion of the transfer
-static TX1_SLOT: TxCell<pac::USART1> = TxCell::new();
-
 pub struct RxOp<'x> {
 	waker: Waker,
 	buf: &'x mut [MaybeUninit<u8>],
@@ -496,82 +587,5 @@ impl<USART: 'static> RxCell<USART> {
 
 	fn try_borrow_mut(&self) -> Result<RefMut<'_, RxCellInner<USART>>, TryBorrowError> {
 		self.inner.try_borrow_mut()
-	}
-}
-
-static RX1_SLOT: RxCell<pac::USART1> = RxCell::new();
-
-pub fn usart1_interrupt() {
-	// So the thing is: we *have* to do things in the interrupt handler in order to prevent interrupts from firing *continuously*.
-	// In particular, we have to clear the interrupt flags.
-	let usart = unsafe { &*stm32f1xx_hal::pac::USART1::ptr() };
-	let sr = usart.sr.read();
-	if sr.txe().bit_is_set() {
-		if sr.tc().bit_is_set() {
-			// transfer complete, make sure we don't get interrupted because of that again
-			usart.sr.modify(|_, w| w.tc().clear_bit());
-		}
-		// transmit interrupt
-		let disable_interrupts = match TX1_SLOT.try_borrow_mut() {
-			Ok(mut b) => match b.1.as_mut() {
-				Some(mut txop_ref) => {
-					if txop_ref.buf.len() > 0 {
-						let ch = txop_ref.buf[0];
-						txop_ref.buf = txop_ref.buf.split_at(1).1;
-						usart.dr.write(|w| w.dr().bits(ch as u16));
-					}
-					if txop_ref.buf.len() == 0 {
-						// all we can do is try to re-trigger the task... we cannot drop the op because the Future's Drop will do that eventually.
-						txop_ref.waker.wake_by_ref();
-						true
-					} else {
-						false
-					}
-				}
-				None => {
-					// disable the interrupts: there is nothing to do.
-					true
-				}
-			},
-			Err(_) => {
-				// this is a problem: the main code is holding the lock while we're interrupting. this may happen rarely, so we have to disable interrupts to give the main code a chance to re-enable them.
-				true
-			}
-		};
-		if disable_interrupts {
-			usart
-				.cr1
-				.modify(|_, w| w.tcie().clear_bit().txeie().clear_bit());
-		}
-	}
-	if sr.rxne().bit_is_set() {
-		let disable_interrupts = match RX1_SLOT.try_borrow_mut() {
-			Ok(mut b) => match b.1.as_mut() {
-				Some(mut rxop_ref) => {
-					if rxop_ref.offs < rxop_ref.buf.len() {
-						let ch = usart.dr.read().dr().bits() as u8;
-						unsafe { rxop_ref.buf[rxop_ref.offs].as_mut_ptr().write(ch) };
-						rxop_ref.offs += 1;
-					}
-					if rxop_ref.offs >= rxop_ref.buf.len() {
-						rxop_ref.waker.wake_by_ref();
-						// disable interrupts, we're done with this transfer.
-						true
-					} else {
-						// there is more to do, wait for the next rxne.
-						false
-					}
-				}
-				// disable interrupts, there is nothing to do.
-				None => true,
-			},
-			Err(_) => {
-				// this is a problem: the main code is holding the lock while we're interrupting. this may happen rarely, so we have to disable interrupts to give the main code a chance to re-enable them.
-				true
-			}
-		};
-		if disable_interrupts {
-			usart.cr1.modify(|_, w| w.rxneie().clear_bit());
-		}
 	}
 }
