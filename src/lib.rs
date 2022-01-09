@@ -12,6 +12,7 @@ pub enum NoReturn {}
 
 pub mod spincell;
 pub mod stm32;
+pub mod stm32_onewire;
 pub mod usart;
 
 #[repr(transparent)]
