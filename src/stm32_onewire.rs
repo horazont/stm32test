@@ -30,8 +30,10 @@ pub type DeviceAddress = [u8; ADDR_LEN as usize];
 pub static ZERO_ADDR: DeviceAddress = [0u8; ADDR_LEN as usize];
 
 #[repr(u8)]
-enum Command {
+pub enum Command {
 	Search = 0xf0,
+	Broadcast = 0xcc,
+	MatchRom = 0x55,
 }
 
 macro_rules! command {
@@ -108,7 +110,7 @@ where
 		self.probe(if bit { 0xff } else { 0x00 })
 	}
 
-	async fn write_bytes(&mut self, bytes: &[u8]) {
+	pub async fn write_bytes(&mut self, bytes: &[u8]) {
 		for byte in bytes.iter() {
 			let mut byte = *byte;
 			for bitoffs in 0..8 {
@@ -120,6 +122,19 @@ where
 					self.probe(0x00).await;
 				}
 			}
+		}
+	}
+
+	pub async fn read_bytes(&mut self, buf: &mut [u8]) {
+		for i in 0..buf.len() {
+			let mut byte_buf = 0x00u8;
+			for bitoffs in 0..8 {
+				let bit = self.bit_read().await;
+				if bit {
+					byte_buf |= (1 << bitoffs);
+				}
+			}
+			buf[i] = byte_buf;
 		}
 	}
 

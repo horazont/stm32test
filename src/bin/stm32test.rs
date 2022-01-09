@@ -146,6 +146,21 @@ mod app {
 				loop {
 					// tx1.write(&b"1111111111111111\n"[..]).await;
 					led1.set_high();
+					tx2.write(&b"sampling ...\n"[..]).await;
+					match onewire.reset().await {
+						stm32_onewire::OneWireStatus::Presence => (),
+						stm32_onewire::OneWireStatus::Empty => {
+							tx2.write(&b"no devices\n"[..]).await;
+							clock.sleep_for(Duration::from_ticks(10000)).await;
+							continue;
+						}
+					}
+					// 0x44 = DS18B20 command to sample temperature
+					onewire
+						.write_bytes(&[stm32_onewire::Command::Broadcast as u8, 0x44][..])
+						.await;
+					clock.sleep_for(Duration::from_ticks(1500)).await;
+
 					let mut addr = stm32_onewire::ZERO_ADDR;
 					tx2.write(&b"scanning\n"[..]).await;
 					loop {
@@ -158,7 +173,24 @@ mod app {
 									let buf = [nibble_to_hex(hi), nibble_to_hex(lo)];
 									tx2.write(&buf[..]).await;
 								}
-								tx2.write(&b"\n"[..]).await;
+								let mut scratchpad = [0u8; 9];
+								// 0xbe = DS18B20 command to read the scratchpad
+								onewire.write_bytes(&[0xbeu8][..]).await;
+								onewire.read_bytes(&mut scratchpad[..]).await;
+								tx2.write(&b" -> "[..]).await;
+								for byte in scratchpad.iter() {
+									let hi = (byte & 0xf0) >> 4;
+									let lo = byte & 0xf;
+									let buf = [nibble_to_hex(hi), nibble_to_hex(lo)];
+									tx2.write(&buf[..]).await;
+								}
+								let mut crc = stm32test::crc8::Crc8::<0x31u8>::new();
+								let crc = crc.feed_array(&scratchpad);
+								if crc == 0x00 {
+									tx2.write(&b" OK\n"[..]).await;
+								} else {
+									tx2.write(&b" CRCERR\n"[..]).await;
+								}
 								clock.sleep_for(Duration::from_ticks(100)).await;
 								led2.set_low();
 							}

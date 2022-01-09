@@ -10,6 +10,7 @@ use pin_project::pin_project;
 
 pub enum NoReturn {}
 
+pub mod crc8;
 pub mod spincell;
 pub mod stm32;
 pub mod stm32_onewire;
