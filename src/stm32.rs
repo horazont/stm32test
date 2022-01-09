@@ -35,35 +35,6 @@ where
 		}
 	}
 
-	pub fn reconfigure<'x>(
-		&'x mut self,
-		config: impl Into<serial::Config>,
-		clocks: rcc::Clocks,
-	) -> Reconfigure<'x, USART> {
-		Reconfigure {
-			r: self,
-			config: config.into(),
-			clocks,
-			serial: None,
-		}
-	}
-
-	pub fn write<'x, B: Into<&'x [u8]> + 'x>(&'x self, buf: B) -> WriteIntr<'x, Tx<USART>> {
-		WriteIntr {
-			tx: PhantomData,
-			state: WriteState::Waiting,
-			buf: buf.into(),
-		}
-	}
-
-	pub fn read<'x, B: Into<&'x mut [u8]>>(&'x self, buf: B) -> ReadIntr<'x, Rx<USART>> {
-		ReadIntr {
-			rx: PhantomData,
-			state: ReadState::Waiting,
-			buf: Some(buf.into()),
-		}
-	}
-
 	pub fn split(self) -> (Tx<USART>, Rx<USART>) {
 		(self.tx, self.rx)
 	}
@@ -122,13 +93,13 @@ where
 			Ok(slot) => slot,
 			Err(_) => panic!("failed to lock usart for reconfiguration"),
 		};
-		// there can be no Tx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
+		// there can be no Tx in progress, as polling can only happen on &mut self
 		assert!(txslot.1.is_none());
 		let mut rxslot = match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
 			Ok(slot) => slot,
 			Err(_) => panic!("failed to lock usart for reconfiguration"),
 		};
-		// there can be no Rx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
+		// there can be no Rx in progress, as polling can only happen on &mut self
 		assert!(rxslot.1.is_none());
 
 		let mut serial = rxslot.0.take().unwrap().reunite(txslot.0.take().unwrap());
@@ -312,92 +283,6 @@ serial!(TX1_SLOT, RX1_SLOT, pac::USART1, usart1_interrupt);
 serial!(TX2_SLOT, RX2_SLOT, pac::USART2, usart2_interrupt);
 
 serial!(TX3_SLOT, RX3_SLOT, pac::USART3, usart3_interrupt);
-
-#[pin_project(PinnedDrop, !Unpin)]
-pub struct Reconfigure<'x, USART: 'static>
-where
-	Tx<USART>: UsartTxSlot<USART = USART>,
-	Rx<USART>: UsartRxSlot<USART = USART>,
-	USART: serial::Instance,
-{
-	r: &'x mut Serial<USART>,
-	config: serial::Config,
-	clocks: rcc::Clocks,
-	serial: Option<serial::ErasedSerial<USART>>,
-}
-
-impl<'x, USART: 'static> Future for Reconfigure<'x, USART>
-where
-	Tx<USART>: UsartTxSlot<USART = USART>,
-	Rx<USART>: UsartRxSlot<USART = USART>,
-	USART: serial::Instance,
-{
-	type Output = ();
-
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.project();
-		let mut txslot = match <Tx<USART> as UsartTxSlot>::try_borrow_mut() {
-			Ok(slot) => slot,
-			Err(_) => panic!("failed to lock usart for reconfiguration"),
-		};
-		// there can be no Tx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
-		assert!(txslot.1.is_none());
-		let mut rxslot = match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
-			Ok(slot) => slot,
-			Err(_) => panic!("failed to lock usart for reconfiguration"),
-		};
-		// there can be no Rx in progress, as the Reconfigure future can only be created from  a mutable reference of the Serial object
-		assert!(rxslot.1.is_none());
-
-		if this.serial.is_none() {
-			let tx = txslot.0.take().unwrap();
-			let rx = rxslot.0.take().unwrap();
-			let serial = tx.reunite(rx);
-			*this.serial = Some(serial);
-		}
-
-		let serial = this.serial.as_mut().unwrap();
-		match serial.reconfigure(*this.config, *this.clocks) {
-			Ok(()) => {
-				drop(serial);
-				let (tx, rx) = this.serial.take().unwrap().split();
-				txslot.0 = Some(tx);
-				rxslot.0 = Some(rx);
-				Poll::Ready(())
-			}
-			Err(nb::Error::WouldBlock) => {
-				cx.waker().wake_by_ref();
-				Poll::Pending
-			}
-			Err(nb::Error::Other(_)) => unreachable!(),
-		}
-	}
-}
-
-#[pinned_drop]
-impl<'x, USART: 'static> PinnedDrop for Reconfigure<'x, USART>
-where
-	Tx<USART>: UsartTxSlot<USART = USART>,
-	Rx<USART>: UsartRxSlot<USART = USART>,
-	USART: serial::Instance,
-{
-	fn drop(self: Pin<&mut Self>) {
-		let this = self.project();
-		if let Some(serial) = this.serial.take() {
-			let mut txslot = match <Tx<USART> as UsartTxSlot>::try_borrow_mut() {
-				Ok(slot) => slot,
-				Err(_) => panic!("failed to lock usart for reconfiguration"),
-			};
-			let mut rxslot = match <Rx<USART> as UsartRxSlot>::try_borrow_mut() {
-				Ok(slot) => slot,
-				Err(_) => panic!("failed to lock usart for reconfiguration"),
-			};
-			let (tx, rx) = serial.split();
-			txslot.0 = Some(tx);
-			rxslot.0 = Some(rx);
-		}
-	}
-}
 
 enum WriteState {
 	Waiting,
